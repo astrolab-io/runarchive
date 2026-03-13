@@ -1,6 +1,4 @@
-![runarchive-logo](assets/runarchive-logo.svg)
-
-# runarchive
+# ![runarchive-logo](https://github.com/luanmm/runarchive/blob/main/assets/logo.svg?raw=true)
 
 `runarchive` is a high-performance, asynchronous, zero-copy ZIP parser designed natively for both standard operating systems (Linux, macOS, Windows) and WebAssembly (WASM).
 
