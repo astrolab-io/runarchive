@@ -1,0 +1,28 @@
+[package]
+name = "runarchive"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1.5"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1.37", features = ["full"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "stream"] }
+async-compression = { version = "0.4", features = ["tokio", "deflate"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.37", features = ["sync", "macros", "io-util", "rt"] }
+reqwest = { version = "0.12" }
+wasm-bindgen-futures = "0.4.42"
+async-compression = { version = "0.4", features = ["tokio", "deflate"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.42"
+tracing-subscriber = "0.3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wiremock = "0.6"
