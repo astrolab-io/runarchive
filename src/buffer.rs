@@ -79,11 +79,8 @@ impl<S: Seeker> RetentionBuffer<S> {
     pub fn buffer_start_offset(&self) -> u64 {
         self.buffer_start_offset
     }
-}
 
-#[async_trait::async_trait]
-impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+    async fn internal_read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         // If the read falls entirely within our retained buffer, serve it.
         let requested_len = buf.len();
         if self.current_offset >= self.buffer_start_offset
@@ -107,7 +104,7 @@ impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
         Ok(n)
     }
 
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+    async fn internal_seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
         let new_offset = match pos {
             SeekFrom::Start(o) => o,
             SeekFrom::Current(o) => {
@@ -128,5 +125,29 @@ impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
 
         self.current_offset = std::cmp::min(new_offset, self.file_size);
         Ok(self.current_offset)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.internal_read(buf).await
+    }
+
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        self.internal_seek(pos).await
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait::async_trait(?Send)]
+impl<S: Seeker> Seeker for RetentionBuffer<S> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+        self.internal_read(buf).await
+    }
+
+    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        self.internal_seek(pos).await
     }
 }

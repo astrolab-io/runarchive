@@ -1341,12 +1341,15 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "js-sys",
  "reqwest",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
  "wiremock",
 ]
 

@@ -13,10 +13,15 @@ pub struct HttpSeeker {
 impl HttpSeeker {
     pub async fn new(url_str: &str) -> Result<Self, IoError> {
         let url = Url::parse(url_str).map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
+        
+        #[cfg(not(target_arch = "wasm32"))]
         let client = Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
             .build()
             .map_err(|e| IoError::new(ErrorKind::Other, e))?;
+            
+        #[cfg(target_arch = "wasm32")]
+        let client = Client::new();
         
         let mut file_size = 0;
         let head_resp = client.head(url.clone()).send().await
@@ -83,7 +88,8 @@ impl HttpSeeker {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Seeker for HttpSeeker {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
         if buf.is_empty() {

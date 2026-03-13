@@ -1,3 +1,9 @@
 pub mod buffer;
 pub mod parser;
 pub mod seeker;
+pub mod archive;
+
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+pub use archive::{Archive, FileEntry};
