@@ -151,3 +151,64 @@ impl<S: Seeker> Seeker for RetentionBuffer<S> {
         self.internal_seek(pos).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::seeker::Seeker;
+    use async_trait::async_trait;
+    use std::io::Cursor;
+
+    struct MockSeeker(Cursor<Vec<u8>>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl Seeker for MockSeeker {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+            std::io::Read::read(&mut self.0, buf)
+        }
+
+        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+            std::io::Seek::seek(&mut self.0, pos)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retention_buffer_fetch_chunk() {
+        let data: Vec<u8> = (0..100).collect();
+        let seeker = MockSeeker(Cursor::new(data.clone()));
+        let mut buffer = RetentionBuffer::new(seeker, 100).await.unwrap();
+
+        buffer.fetch_chunk(50, 20).await.unwrap();
+        assert_eq!(buffer.buffer_start_offset(), 50);
+        
+        let slice = buffer.get_retained_slice(55, 10).unwrap();
+        assert_eq!(slice, &data[55..65]);
+
+        assert!(buffer.get_retained_slice(40, 10).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_retention_buffer_internal_read_seek() {
+        let data: Vec<u8> = (0..200).collect();
+        let seeker = MockSeeker(Cursor::new(data.clone()));
+        let mut buffer = RetentionBuffer::new(seeker, 200).await.unwrap();
+
+        // Fetch piece
+        buffer.fetch_chunk(100, 50).await.unwrap();
+
+        // Read inside retained buffer
+        buffer.seek(SeekFrom::Start(110)).await.unwrap();
+        let mut buf = vec![0; 10];
+        let n = buffer.read(&mut buf).await.unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(buf, &data[110..120]);
+
+        // Attempt to read OUTSIDE the retained buffer (this bypasses retention memory natively)
+        buffer.seek(SeekFrom::Start(180)).await.unwrap();
+        let mut buf2 = vec![0; 10];
+        let n2 = buffer.read(&mut buf2).await.unwrap();
+        assert_eq!(n2, 10);
+        assert_eq!(buf2, &data[180..190]);
+    }
+}

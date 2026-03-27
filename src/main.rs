@@ -16,12 +16,27 @@ struct Cli {
 
     #[arg(value_name = "FILENAME")]
     filename: Option<String>,
+
+    #[arg(long, default_value_t = false, help = "Enable resumable extraction")]
+    resumable: bool,
+
+    #[arg(long, default_value_t = false, help = "Show progress bars")]
+    progress: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if cli.resumable {
+        let path = std::path::Path::new(".runarchive");
+        if !path.exists() {
+            if let Err(e) = std::fs::create_dir(path) {
+                eprintln!("Warning: could not create .runarchive directory: {}", e);
+            }
+        }
+    }
 
     let mut archive = runarchive::Archive::open(&cli.uri).await.unwrap_or_else(|e| {
         eprintln!("Failed to read archive metadata: {}", e);
@@ -30,7 +45,7 @@ async fn main() {
 
     if let Some(filename) = cli.filename {
         let mut stdout = tokio::io::stdout();
-        if let Err(e) = archive.extract_file(&filename, &mut stdout).await {
+        if let Err(e) = archive.extract_file(&filename, &mut stdout, cli.resumable, cli.progress).await {
             eprintln!("Failed to extract file: {}", e);
             exit(1);
         }

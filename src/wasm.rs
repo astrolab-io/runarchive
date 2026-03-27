@@ -34,12 +34,12 @@ impl WasmArchive {
 
     /// Extracts the file yielding a Uint8Array byte slice
     #[wasm_bindgen(js_name = extractFile)]
-    pub async fn extract_file(&mut self, filename: String) -> Result<js_sys::Uint8Array, JsValue> {
+    pub async fn extract_file(&mut self, filename: String, resumable: Option<bool>) -> Result<js_sys::Uint8Array, JsValue> {
         let mut buffer = Vec::new();
 
         // Convert JS memory copy through the runtime
         self.inner
-            .extract_file(&filename, &mut buffer)
+            .extract_file(&filename, &mut buffer, resumable.unwrap_or(false))
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
