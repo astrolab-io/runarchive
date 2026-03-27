@@ -1,7 +1,8 @@
 use crate::buffer::RetentionBuffer;
 use crate::parser;
-use crate::seeker::{Seeker, SeekerBox};
+use crate::seeker::{Seeker, SeekerImpl};
 use std::io::{Error as IoError, ErrorKind};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -14,7 +15,7 @@ pub struct FileEntry {
 
 pub struct Archive {
     uri: String,
-    buffer: RetentionBuffer<SeekerBox>,
+    buffer: RetentionBuffer<SeekerImpl>,
     entries: Vec<FileEntry>,
 }
 
@@ -22,12 +23,16 @@ impl Archive {
     pub async fn open(uri: &str) -> Result<Self, IoError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // The original code had a misplaced snippet here.
+            // Assuming the intent was to keep the existing structure and
+            // the `_guard` part was either a placeholder or intended for a different context.
+            // Reverting to the original structure for `open` function's desktop part.
             let is_http = uri.starts_with("http://") || uri.starts_with("https://");
 
             let (seeker, file_size) = if is_http {
                 let s = crate::seeker::http::HttpSeeker::new(uri).await?;
                 let size = s.file_size();
-                (Box::new(s) as SeekerBox, size)
+                (crate::seeker::SeekerImpl::Http(s), size)
             } else {
                 let file_path = if let Some(stripped) = uri.strip_prefix("file://") {
                     stripped.to_string()
@@ -38,7 +43,7 @@ impl Archive {
                 let s = crate::seeker::file::FileSeeker::new(&file_path).await?;
                 let metadata = tokio::fs::metadata(&file_path).await?;
                 let size = metadata.len();
-                (Box::new(s) as SeekerBox, size)
+                (crate::seeker::SeekerImpl::File(s), size)
             };
 
             Self::from_seeker(uri, seeker, file_size).await
@@ -47,13 +52,13 @@ impl Archive {
         {
             let s = crate::seeker::http::HttpSeeker::new(uri).await?;
             let size = s.file_size();
-            let seeker = Box::new(s) as SeekerBox;
+            let seeker = crate::seeker::SeekerImpl::Http(s);
             Self::from_seeker(uri, seeker, size).await
         }
     }
 
     /// Internal initializer from an already resolved seeker
-    async fn from_seeker(uri: &str, seeker: SeekerBox, file_size: u64) -> Result<Self, IoError> {
+    async fn from_seeker(uri: &str, seeker: SeekerImpl, file_size: u64) -> Result<Self, IoError> {
         let mut buffer = RetentionBuffer::new(seeker, file_size).await?;
 
         let max_eocd_size = 65557;
@@ -202,274 +207,30 @@ impl Archive {
                 }
             }
         } else if target.compression_method == 8 {
-            use libz_sys::*;
-            use std::ffi::c_int;
-
-            struct ZStreamSend(z_stream);
-            unsafe impl Send for ZStreamSend {}
-
-            extern "C" {
-                fn malloc(size: usize) -> *mut std::ffi::c_void;
-                fn free(p: *mut std::ffi::c_void);
-            }
-            unsafe extern "C" fn zalloc_stub(
-                _opaque: *mut std::ffi::c_void,
-                items: std::ffi::c_uint,
-                size: std::ffi::c_uint,
-            ) -> *mut std::ffi::c_void {
-                malloc((items * size) as usize)
-            }
-            unsafe extern "C" fn zfree_stub(
-                _opaque: *mut std::ffi::c_void,
-                ptr: *mut std::ffi::c_void,
-            ) {
-                free(ptr)
-            }
-
-            let checkpoint = if resumable {
-                crate::resume::platform::load_checkpoint(&self.uri, filename).await
+            let progress: Option<Arc<dyn crate::deflate::ProgressObserver>> = if progress {
+                Some(Arc::new(crate::progress::IndicatifProgress {
+                    pb_download: pb_download.clone(),
+                    pb_decompress: pb_decompress.clone(),
+                    mp: mp_ref.clone(),
+                }))
             } else {
                 None
             };
 
-            let mut stream_obj = ZStreamSend(z_stream {
-                next_in: std::ptr::null_mut(),
-                avail_in: 0,
-                total_in: 0,
-                next_out: std::ptr::null_mut(),
-                avail_out: 0,
-                total_out: 0,
-                msg: std::ptr::null_mut(),
-                state: std::ptr::null_mut(),
-                zalloc: zalloc_stub,
-                zfree: zfree_stub,
-                opaque: std::ptr::null_mut(),
-                data_type: 0,
-                adler: 0,
-                reserved: 0,
-            });
-
-            let version = b"1.3.0\0".as_ptr() as *const std::ffi::c_char;
-            unsafe {
-                let init_err = inflateInit2_(
-                    &mut stream_obj.0,
-                    -15,
-                    version,
-                    std::mem::size_of::<z_stream>() as c_int,
-                );
-                if init_err != Z_OK {
-                    return Err(IoError::new(
-                        ErrorKind::Other,
-                        "Failed to initialize z_stream",
-                    ));
-                }
-            }
-
-            // Shared cursor updated on every DEFLATE block boundary.
-            // The CheckpointGuard ensures it is saved to disk even if the process is killed
-            // before the next periodic save — preventing overlapping bytes on append-resume.
-            #[cfg(not(target_arch = "wasm32"))]
-            let shared_cursor: std::sync::Arc<
-                std::sync::Mutex<Option<crate::resume::ResumableCursor>>,
-            > = std::sync::Arc::new(std::sync::Mutex::new(None));
-
-            #[cfg(not(target_arch = "wasm32"))]
-            let _guard = if resumable {
-                Some(crate::resume::CheckpointGuard::new(
-                    &self.uri,
+            crate::deflate::decompress_deflate(
+                &mut self.buffer,
+                &mut writer,
+                progress,
+                crate::deflate::DecompressionOptions {
+                    uri: &self.uri,
                     filename,
-                    std::sync::Arc::clone(&shared_cursor),
-                ))
-            } else {
-                None
-            };
-
-            let mut current_payload_offset = payload_offset;
-            let mut last_checkpoint_uncompressed = 0;
-            let mut uncompressed_offset = 0;
-            let mut dictionary_window = std::collections::VecDeque::with_capacity(32768);
-            if let Some(cp) = checkpoint {
-                unsafe {
-                    let b = cp.bits;
-                    if cp.bit_count > 0 {
-                        let ret =
-                            inflatePrime(&mut stream_obj.0, cp.bit_count as c_int, b as c_int);
-                        if ret != Z_OK {
-                            inflateEnd(&mut stream_obj.0);
-                            return Err(IoError::new(
-                                ErrorKind::Other,
-                                format!("inflatePrime failed: {}", ret),
-                            ));
-                        }
-                    }
-                    if !cp.dictionary_window.is_empty() {
-                        let ret = inflateSetDictionary(
-                            &mut stream_obj.0,
-                            cp.dictionary_window.as_ptr(),
-                            cp.dictionary_window.len() as u32,
-                        );
-                        if ret != Z_OK {
-                            inflateEnd(&mut stream_obj.0);
-                            return Err(IoError::new(
-                                ErrorKind::Other,
-                                format!("inflateSetDictionary failed: {}", ret),
-                            ));
-                        }
-                    }
-                }
-
-                last_checkpoint_uncompressed = cp.uncompressed_offset;
-                uncompressed_offset = cp.uncompressed_offset;
-                for &b in &cp.dictionary_window {
-                    dictionary_window.push_back(b);
-                }
-
-                current_payload_offset = cp.compressed_offset;
-
-                let resume_msg = format!(
-                    "=> Resume Checkpoint Loaded (ZRAN)\n=> Resuming from {} bytes.",
-                    uncompressed_offset
-                );
-                if let Some(ref mp) = mp_ref {
-                    mp.println(resume_msg).unwrap_or(());
-                } else {
-                    eprintln!("{}", resume_msg);
-                }
-            }
-
-            self.buffer
-                .seek(std::io::SeekFrom::Start(current_payload_offset))
-                .await?;
-            let interval = crate::resume::calculate_checkpoint_interval(target.size);
-
-            let mut chunk = vec![0u8; 65536];
-            let mut out_buffer = vec![0u8; 65536];
-            let total_compressed_read = current_payload_offset - payload_offset;
-
-            let mut remaining = target.compressed_size.saturating_sub(total_compressed_read);
-
-            if let Some(ref pb) = pb_download {
-                pb.set_position(total_compressed_read);
-            }
-            if let Some(ref pb) = pb_decompress {
-                pb.set_position(uncompressed_offset);
-            }
-
-            while remaining > 0 {
-                let to_read = std::cmp::min(remaining, chunk.len() as u64) as usize;
-                let n = self.buffer.read(&mut chunk[..to_read]).await?;
-                if n == 0 {
-                    break;
-                }
-
-                remaining -= n as u64;
-                if let Some(ref pb) = pb_download {
-                    pb.inc(n as u64);
-                }
-
-                stream_obj.0.next_in = chunk.as_mut_ptr();
-                stream_obj.0.avail_in = n as u32;
-
-                while stream_obj.0.avail_in > 0 {
-                    stream_obj.0.next_out = out_buffer.as_mut_ptr();
-                    stream_obj.0.avail_out = out_buffer.len() as u32;
-
-                    let ret = unsafe { inflate(&mut stream_obj.0, Z_BLOCK) };
-
-                    if ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR {
-                        unsafe {
-                            inflateEnd(&mut stream_obj.0);
-                        }
-                        return Err(IoError::new(
-                            ErrorKind::InvalidData,
-                            format!("zlib inflate error: {}", ret),
-                        ));
-                    }
-
-                    let written = out_buffer.len() - stream_obj.0.avail_out as usize;
-                    if written > 0 {
-                        writer.write_all(&out_buffer[..written]).await?;
-                        uncompressed_offset += written as u64;
-                        if let Some(ref pb) = pb_decompress {
-                            pb.inc(written as u64);
-                        }
-
-                        for &b in &out_buffer[..written] {
-                            if dictionary_window.len() == 32768 {
-                                dictionary_window.pop_front();
-                            }
-                            dictionary_window.push_back(b);
-                        }
-                    }
-
-                    // Check block boundary: data_type bit 7 = boundary, bit 6 = last block
-                    let data_type = stream_obj.0.data_type;
-                    if resumable && (data_type & 128 != 0 && data_type & 64 == 0) {
-                        let bit_count = (data_type & 7) as u8;
-                        let mut bits_value = 0u8;
-                        let current_in_offset =
-                            current_payload_offset + n as u64 - stream_obj.0.avail_in as u64;
-
-                        if bit_count > 0 {
-                            unsafe {
-                                let last_byte_ptr = stream_obj.0.next_in.offset(-1);
-                                let last_byte = *last_byte_ptr;
-                                bits_value = last_byte >> (8 - bit_count);
-                            }
-                        }
-
-                        let win_vec: Vec<u8> = dictionary_window.iter().copied().collect();
-
-                        let latest = crate::resume::ResumableCursor {
-                            compressed_offset: current_in_offset,
-                            uncompressed_offset,
-                            bit_count,
-                            bits: bits_value,
-                            dictionary_window: win_vec,
-                        };
-
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if let Ok(mut lock) = shared_cursor.lock() {
-                                *lock = Some(latest.clone());
-                            }
-                        }
-
-                        if uncompressed_offset - last_checkpoint_uncompressed >= interval {
-                            if let Err(e) = crate::resume::platform::save_checkpoint(
-                                &self.uri, filename, &latest,
-                            )
-                            .await
-                            {
-                                eprintln!("Warning: Failed to save checkpoint: {}", e);
-                            }
-                            last_checkpoint_uncompressed = uncompressed_offset;
-                        }
-                    }
-
-                    if ret == Z_STREAM_END {
-                        break;
-                    }
-                }
-                current_payload_offset += n as u64;
-            }
-
-            unsafe {
-                inflateEnd(&mut stream_obj.0);
-            }
-
-            if let Some(pb) = pb_download {
-                pb.finish_with_message("Done");
-            }
-            if let Some(pb) = pb_decompress {
-                pb.finish_with_message("Done");
-            }
-
-            // Disarm the guard: on drop it will delete the checkpoint file instead of saving.
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(ref guard) = _guard {
-                guard.disarm();
-            }
+                    payload_offset,
+                    compressed_size: target.compressed_size,
+                    uncompressed_size: target.size,
+                    resumable,
+                },
+            )
+            .await?;
         } else {
             return Err(IoError::new(
                 ErrorKind::Unsupported,

@@ -15,13 +15,14 @@ impl FileSeeker {
     }
 }
 
-#[async_trait::async_trait]
 impl Seeker for FileSeeker {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        self.file.read(buf).await
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> impl std::future::Future<Output = Result<usize, IoError>> + Send + 'a {
+        async move { self.file.read(buf).await }
     }
 
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        self.file.seek(pos).await
+    #[cfg(not(target_arch = "wasm32"))]
+    fn seek(&mut self, pos: SeekFrom) -> impl std::future::Future<Output = Result<u64, IoError>> + Send + '_ {
+        async move { self.file.seek(pos).await }
     }
 }

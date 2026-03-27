@@ -39,7 +39,7 @@ impl WasmArchive {
 
         // Convert JS memory copy through the runtime
         self.inner
-            .extract_file(&filename, &mut buffer, resumable.unwrap_or(false))
+            .extract_file(&filename, &mut buffer, resumable.unwrap_or(false), false)
             .await
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

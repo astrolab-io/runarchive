@@ -1,38 +1,84 @@
 use std::io::{Error as IoError, SeekFrom};
-use async_trait::async_trait;
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait Seeker {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError>;
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError>;
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + Send + 'a;
+    #[cfg(target_arch = "wasm32")]
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + 'a;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + Send + '_;
+    #[cfg(target_arch = "wasm32")]
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + '_;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub type SeekerBox = Box<dyn Seeker + Send + Sync + Unpin>;
-
-#[cfg(target_arch = "wasm32")]
-pub type SeekerBox = Box<dyn Seeker + Unpin>;
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait]
-impl<S: ?Sized + Seeker + Unpin + Send> Seeker for Box<S> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        (**self).read(buf).await
-    }
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        (**self).seek(pos).await
-    }
+pub enum SeekerImpl {
+    #[cfg(not(target_arch = "wasm32"))]
+    File(file::FileSeeker),
+    Http(http::HttpSeeker),
 }
 
-#[cfg(target_arch = "wasm32")]
-#[async_trait(?Send)]
-impl<S: ?Sized + Seeker + Unpin> Seeker for Box<S> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        (**self).read(buf).await
+impl Seeker for SeekerImpl {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + Send + 'a {
+        async move {
+            match self {
+                SeekerImpl::File(s) => s.read(buf).await,
+                SeekerImpl::Http(s) => s.read(buf).await,
+            }
+        }
     }
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        (**self).seek(pos).await
+
+    #[cfg(target_arch = "wasm32")]
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + 'a {
+        async move {
+            match self {
+                SeekerImpl::Http(s) => s.read(buf).await,
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + Send + '_ {
+        async move {
+            match self {
+                SeekerImpl::File(s) => s.seek(pos).await,
+                SeekerImpl::Http(s) => s.seek(pos).await,
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + '_ {
+        async move {
+            match self {
+                SeekerImpl::Http(s) => s.seek(pos).await,
+            }
+        }
     }
 }
 

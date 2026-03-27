@@ -129,26 +129,36 @@ impl<S: Seeker> RetentionBuffer<S> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
 impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        self.internal_read(buf).await
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + Send + 'a {
+        async move { self.internal_read(buf).await }
     }
 
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        self.internal_seek(pos).await
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + Send + '_ {
+        async move { self.internal_seek(pos).await }
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-#[async_trait::async_trait(?Send)]
-impl<S: Seeker> Seeker for RetentionBuffer<S> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        self.internal_read(buf).await
+impl<S: Seeker + Send> Seeker for RetentionBuffer<S> {
+    fn read<'a>(
+        &'a mut self,
+        buf: &'a mut [u8],
+    ) -> impl std::future::Future<Output = Result<usize, IoError>> + 'a {
+        async move { self.internal_read(buf).await }
     }
 
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        self.internal_seek(pos).await
+    fn seek(
+        &mut self,
+        pos: SeekFrom,
+    ) -> impl std::future::Future<Output = Result<u64, IoError>> + '_ {
+        async move { self.internal_seek(pos).await }
     }
 }
 
@@ -156,20 +166,41 @@ impl<S: Seeker> Seeker for RetentionBuffer<S> {
 mod tests {
     use super::*;
     use crate::seeker::Seeker;
-    use async_trait::async_trait;
     use std::io::Cursor;
 
     struct MockSeeker(Cursor<Vec<u8>>);
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     impl Seeker for MockSeeker {
-        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-            std::io::Read::read(&mut self.0, buf)
+        #[cfg(not(target_arch = "wasm32"))]
+        fn read<'a>(
+            &'a mut self,
+            buf: &'a mut [u8],
+        ) -> impl std::future::Future<Output = Result<usize, IoError>> + Send + 'a {
+            async move { std::io::Read::read(&mut self.0, buf) }
         }
 
-        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-            std::io::Seek::seek(&mut self.0, pos)
+        #[cfg(target_arch = "wasm32")]
+        fn read<'a>(
+            &'a mut self,
+            buf: &'a mut [u8],
+        ) -> impl std::future::Future<Output = Result<usize, IoError>> + 'a {
+            async move { std::io::Read::read(&mut self.0, buf) }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        fn seek(
+            &mut self,
+            pos: SeekFrom,
+        ) -> impl std::future::Future<Output = Result<u64, IoError>> + Send + '_ {
+            async move { std::io::Seek::seek(&mut self.0, pos) }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        fn seek(
+            &mut self,
+            pos: SeekFrom,
+        ) -> impl std::future::Future<Output = Result<u64, IoError>> + '_ {
+            async move { std::io::Seek::seek(&mut self.0, pos) }
         }
     }
 
@@ -181,7 +212,7 @@ mod tests {
 
         buffer.fetch_chunk(50, 20).await.unwrap();
         assert_eq!(buffer.buffer_start_offset(), 50);
-        
+
         let slice = buffer.get_retained_slice(55, 10).unwrap();
         assert_eq!(slice, &data[55..65]);
 
