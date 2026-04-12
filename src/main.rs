@@ -1,9 +1,9 @@
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use clap::Parser;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::process::exit;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[derive(Parser, Debug)]
 #[command(
     name = "runarchive",
@@ -42,8 +42,31 @@ async fn main() {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_os = "wasi")]
+#[wstd::main]
+async fn main() {
+    let cli = Cli::parse();
+
+    let mut archive = runarchive::Archive::open(&cli.uri).await.unwrap_or_else(|e| {
+        eprintln!("Failed to read archive metadata: {}", e);
+        exit(1);
+    });
+
+    if let Some(filename) = cli.filename {
+        let mut stdout = wstd::io::stdout();
+        if let Err(e) = archive.extract_file(&filename, &mut stdout).await {
+            eprintln!("Failed to extract file: {}", e);
+            exit(1);
+        }
+    } else {
+        let files = archive.list_files();
+        for f in files {
+            println!("{} - {} bytes", f.name, f.size);
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn main() {
-    // Dummy main for WASM native builds.
-    // WASM leverages lib.rs entrypoints typically instead of a direct binary orchestrator
+    // Dummy main for browser WASM builds.
 }

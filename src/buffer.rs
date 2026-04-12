@@ -128,7 +128,7 @@ impl<S: Seeker> RetentionBuffer<S> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "wasi")))]
 #[async_trait::async_trait]
 impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
@@ -140,7 +140,7 @@ impl<S: Seeker + Send + Sync> Seeker for RetentionBuffer<S> {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "wasi"))]
 #[async_trait::async_trait(?Send)]
 impl<S: Seeker> Seeker for RetentionBuffer<S> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {

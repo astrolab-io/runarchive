@@ -19,7 +19,7 @@ pub struct Archive {
 
 impl Archive {
     pub async fn open(uri: &str) -> Result<Self, IoError> {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
         {
             let is_http = uri.starts_with("http://") || uri.starts_with("https://");
 
@@ -35,14 +35,21 @@ impl Archive {
                 };
 
                 let s = crate::seeker::file::FileSeeker::new(&file_path).await?;
-                let metadata = tokio::fs::metadata(&file_path).await?;
-                let size = metadata.len();
+                
+                #[cfg(not(target_os = "wasi"))]
+                let size = tokio::fs::metadata(&file_path).await?.len();
+                #[cfg(target_os = "wasi")]
+                let size = {
+                    let m = std::fs::metadata(&file_path)?;
+                    m.len()
+                };
+                
                 (Box::new(s) as SeekerBox, size)
             };
 
             Self::from_seeker(seeker, file_size).await
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             let s = crate::seeker::http::HttpSeeker::new(uri).await?;
             let size = s.file_size();
@@ -105,7 +112,11 @@ impl Archive {
     }
 
     /// Extracts a specific file by name to the provided AsyncWrite stream
-    pub async fn extract_file<W: tokio::io::AsyncWrite + Unpin>(&mut self, filename: &str, mut writer: W) -> Result<(), IoError> {
+    #[cfg(not(target_os = "wasi"))]
+    pub async fn extract_file<W>(&mut self, filename: &str, mut writer: W) -> Result<(), IoError> 
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
         let target = self.entries.iter().find(|e| e.name == filename).cloned();
         let target = target.ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
         
@@ -124,8 +135,6 @@ impl Archive {
         let payload_offset = target.offset + 30 + fn_len as u64 + extra_len as u64;
         self.buffer.seek(std::io::SeekFrom::Start(payload_offset)).await?;
         
-        use tokio::io::AsyncWriteExt;
-        
         if target.compression_method == 0 {
             let mut remaining = target.compressed_size;
             let mut chunk = vec![0u8; 65536];
@@ -133,10 +142,14 @@ impl Archive {
                 let to_read = std::cmp::min(remaining, chunk.len() as u64) as usize;
                 let n = self.buffer.read(&mut chunk[..to_read]).await?;
                 if n == 0 { break; }
+                
+                use tokio::io::AsyncWriteExt;
                 writer.write_all(&chunk[..n]).await?;
+                
                 remaining -= n as u64;
             }
         } else if target.compression_method == 8 {
+            use tokio::io::AsyncWriteExt;
             let mut decoder = async_compression::tokio::write::DeflateDecoder::new(writer);
             let mut remaining = target.compressed_size;
             let mut chunk = vec![0u8; 65536];
@@ -148,6 +161,95 @@ impl Archive {
                 remaining -= n as u64;
             }
             decoder.shutdown().await?;
+        } else {
+            return Err(IoError::new(ErrorKind::Unsupported, format!("Unsupported compression method: {}", target.compression_method)));
+        }
+        
+        Ok(())
+    }
+
+    /// Extracts a specific file by name to the provided AsyncWrite stream
+    #[cfg(target_os = "wasi")]
+    pub async fn extract_file<W>(&mut self, filename: &str, mut writer: W) -> Result<(), IoError> 
+    where
+        W: wstd::io::AsyncWrite + Unpin,
+    {
+        let target = self.entries.iter().find(|e| e.name == filename).cloned();
+        let target = target.ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
+        
+        self.buffer.seek(std::io::SeekFrom::Start(target.offset)).await?;
+        
+        let mut lfh_fixed = vec![0u8; 30];
+        self.buffer.read(&mut lfh_fixed).await?;
+        
+        if &lfh_fixed[0..4] != &[0x50, 0x4b, 0x03, 0x04] {
+            return Err(IoError::new(ErrorKind::InvalidData, "Invalid Local File Header signature"));
+        }
+        
+        let fn_len = u16::from_le_bytes([lfh_fixed[26], lfh_fixed[27]]) as usize;
+        let extra_len = u16::from_le_bytes([lfh_fixed[28], lfh_fixed[29]]) as usize;
+        
+        let payload_offset = target.offset + 30 + fn_len as u64 + extra_len as u64;
+        self.buffer.seek(std::io::SeekFrom::Start(payload_offset)).await?;
+        
+        if target.compression_method == 0 {
+            let mut remaining = target.compressed_size;
+            let mut chunk = vec![0u8; 65536];
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, chunk.len() as u64) as usize;
+                let n = self.buffer.read(&mut chunk[..to_read]).await?;
+                if n == 0 { break; }
+                
+                let mut written = 0;
+                while written < n {
+                    let m = writer.write(&chunk[written..n]).await?;
+                    if m == 0 { return Err(IoError::new(ErrorKind::WriteZero, "Failed to write whole chunk")); }
+                    written += m;
+                }
+                
+                remaining -= n as u64;
+            }
+        } else if target.compression_method == 8 {
+            use flate2::{Decompress, FlushDecompress, Status};
+            let mut decompressor = Decompress::new(false);
+            let mut remaining = target.compressed_size;
+            let mut chunk = vec![0u8; 65536];
+            let mut out_buffer = vec![0u8; 65536];
+            
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, chunk.len() as u64) as usize;
+                let n = self.buffer.read(&mut chunk[..to_read]).await?;
+                if n == 0 { break; }
+                
+                let mut consumed = 0;
+                while consumed < n {
+                    let before_in = decompressor.total_in();
+                    let before_out = decompressor.total_out();
+                    
+                    let status = decompressor.decompress(
+                        &chunk[consumed..n],
+                        &mut out_buffer,
+                        FlushDecompress::None,
+                    ).map_err(|e| IoError::new(ErrorKind::InvalidData, e))?;
+                    
+                    let produced = (decompressor.total_out() - before_out) as usize;
+                    consumed += (decompressor.total_in() - before_in) as usize;
+                    
+                    if produced > 0 {
+                        let mut written = 0;
+                        while written < produced {
+                            let m = writer.write(&out_buffer[written..produced]).await?;
+                            if m == 0 { return Err(IoError::new(ErrorKind::WriteZero, "Failed to write whole chunk")); }
+                            written += m;
+                        }
+                    }
+                    
+                    if status == Status::StreamEnd {
+                        break;
+                    }
+                }
+                remaining -= n as u64;
+            }
         } else {
             return Err(IoError::new(ErrorKind::Unsupported, format!("Unsupported compression method: {}", target.compression_method)));
         }

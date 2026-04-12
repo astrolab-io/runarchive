@@ -36,7 +36,7 @@ impl<S: ?Sized + Seeker + Unpin> Seeker for Box<S> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub mod file;
 
 pub mod http;
