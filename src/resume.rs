@@ -24,7 +24,7 @@ pub fn get_cache_path(uri: &str, filename: &str) -> PathBuf {
     path
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub mod platform {
     use super::*;
     use std::fs;
@@ -88,7 +88,7 @@ pub mod platform {
 /// to the checkpoint file, ensuring the resumed append has no overlapping bytes.
 ///
 /// Call `disarm()` on successful completion so the guard deletes the file instead.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 pub struct CheckpointGuard {
     uri: String,
     filename: String,
@@ -96,7 +96,7 @@ pub struct CheckpointGuard {
     latest_cursor: std::sync::Arc<std::sync::Mutex<Option<ResumableCursor>>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 impl CheckpointGuard {
     /// Creates a new guard in the *armed* state (will save on drop).
     pub fn new(
@@ -119,7 +119,7 @@ impl CheckpointGuard {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 impl Drop for CheckpointGuard {
     fn drop(&mut self) {
         let cursor_opt = self.latest_cursor.lock()
@@ -141,7 +141,7 @@ impl Drop for CheckpointGuard {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 pub mod platform {
     use super::*;
     use wasm_bindgen::{JsCast, JsValue};
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(calculate_checkpoint_interval(10u64 * 1024 * 1024 * 1024), 25 * 1024 * 1024);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
     #[tokio::test]
     async fn test_platform_checkpointing() {
         let uri = "http://example.com/test.zip";

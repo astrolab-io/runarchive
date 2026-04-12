@@ -2,6 +2,7 @@ use crate::buffer::RetentionBuffer;
 use crate::parser;
 use crate::seeker::{Seeker, SeekerImpl};
 use std::io::{Error as IoError, ErrorKind};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -48,7 +49,14 @@ impl Archive {
 
             Self::from_seeker(uri, seeker, file_size).await
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(target_os = "wasi")]
+        {
+            let s = crate::seeker::wasi_http::WasiHttpSeeker::new(uri.to_string()).await?;
+            let size = s.file_size();
+            let seeker = crate::seeker::SeekerImpl::WasiHttp(s);
+            Self::from_seeker(uri, seeker, size).await
+        }
+        #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
         {
             let s = crate::seeker::http::HttpSeeker::new(uri).await?;
             let size = s.file_size();
@@ -118,7 +126,10 @@ impl Archive {
         &self.entries
     }
 
-    /// Extracts a specific file by name to the provided AsyncWrite stream
+    /// Extracts a specific file by name to the provided `AsyncWrite` stream.
+    ///
+    /// Only available on non-WASM targets where `tokio` is available.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn extract_file<W: tokio::io::AsyncWrite + Unpin>(
         &mut self,
         filename: &str,
@@ -130,10 +141,14 @@ impl Archive {
         let target =
             target.ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
 
+        #[cfg(feature = "cli")]
         let mut pb_download = None;
+        #[cfg(feature = "cli")]
         let mut pb_decompress = None;
+        #[cfg(feature = "cli")]
         let mut mp_ref = None;
 
+        #[cfg(feature = "cli")]
         if progress {
             use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
             let mp = MultiProgress::new();
@@ -163,27 +178,7 @@ impl Archive {
             mp_ref = Some(mp);
         }
 
-        self.buffer
-            .seek(std::io::SeekFrom::Start(target.offset))
-            .await?;
-
-        let mut lfh_fixed = vec![0u8; 30];
-        self.buffer.read(&mut lfh_fixed).await?;
-
-        if &lfh_fixed[0..4] != &[0x50, 0x4b, 0x03, 0x04] {
-            return Err(IoError::new(
-                ErrorKind::InvalidData,
-                "Invalid Local File Header signature",
-            ));
-        }
-
-        let fn_len = u16::from_le_bytes([lfh_fixed[26], lfh_fixed[27]]) as usize;
-        let extra_len = u16::from_le_bytes([lfh_fixed[28], lfh_fixed[29]]) as usize;
-
-        let payload_offset = target.offset + 30 + fn_len as u64 + extra_len as u64;
-        self.buffer
-            .seek(std::io::SeekFrom::Start(payload_offset))
-            .await?;
+        let payload_offset = self.read_local_header_payload_offset(&target).await?;
 
         use tokio::io::AsyncWriteExt;
 
@@ -198,16 +193,10 @@ impl Archive {
                 }
                 writer.write_all(&chunk[..n]).await?;
                 remaining -= n as u64;
-
-                if let Some(ref pb) = pb_download {
-                    pb.inc(n as u64);
-                }
-                if let Some(ref pb) = pb_decompress {
-                    pb.inc(n as u64);
-                }
             }
         } else if target.compression_method == 8 {
-            let progress: Option<Arc<dyn crate::deflate::ProgressObserver>> = if progress {
+            #[cfg(feature = "cli")]
+            let obs: Option<Arc<dyn crate::deflate::ProgressObserver>> = if progress {
                 Some(Arc::new(crate::progress::IndicatifProgress {
                     pb_download: pb_download.clone(),
                     pb_decompress: pb_decompress.clone(),
@@ -216,11 +205,14 @@ impl Archive {
             } else {
                 None
             };
+            #[cfg(not(feature = "cli"))]
+            let obs: Option<Arc<dyn crate::deflate::ProgressObserver>> = None;
+            let _ = progress; // suppress unused warning when cli feature is off
 
             crate::deflate::decompress_deflate(
                 &mut self.buffer,
                 &mut writer,
-                progress,
+                obs,
                 crate::deflate::DecompressionOptions {
                     uri: &self.uri,
                     filename,
@@ -243,6 +235,94 @@ impl Archive {
 
         Ok(())
     }
+
+    /// Extracts a specific file, delivering decompressed data via a synchronous chunk callback.
+    ///
+    /// This is the WASM-compatible extraction path — it avoids `tokio::io::AsyncWrite`
+    /// and instead calls `write_chunk` for each decompressed buffer, allowing the
+    /// caller to process data row-by-row (e.g., CSV parsing) without any allocation.
+    pub async fn extract_file_with_callback<F>(
+        &mut self,
+        filename: &str,
+        mut write_chunk: F,
+    ) -> Result<(), IoError>
+    where
+        F: FnMut(&[u8]) -> Result<(), IoError>,
+    {
+        let target = self.entries.iter().find(|e| e.name == filename).cloned();
+        let target =
+            target.ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
+
+        let payload_offset = self.read_local_header_payload_offset(&target).await?;
+
+        if target.compression_method == 0 {
+            let mut remaining = target.compressed_size;
+            let mut chunk = vec![0u8; 65536];
+            while remaining > 0 {
+                let to_read = std::cmp::min(remaining, chunk.len() as u64) as usize;
+                let n = self.buffer.read(&mut chunk[..to_read]).await?;
+                if n == 0 {
+                    break;
+                }
+                write_chunk(&chunk[..n])?;
+                remaining -= n as u64;
+            }
+        } else if target.compression_method == 8 {
+            crate::deflate::decompress_deflate_callback(
+                &mut self.buffer,
+                &mut write_chunk,
+                crate::deflate::DecompressionOptions {
+                    uri: &self.uri,
+                    filename,
+                    payload_offset,
+                    compressed_size: target.compressed_size,
+                    uncompressed_size: target.size,
+                    resumable: false,
+                },
+            )
+            .await?;
+        } else {
+            return Err(IoError::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "Unsupported compression method: {}",
+                    target.compression_method
+                ),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Reads the local file header and returns the payload start offset.
+    async fn read_local_header_payload_offset(
+        &mut self,
+        entry: &FileEntry,
+    ) -> Result<u64, IoError> {
+        self.buffer
+            .seek(std::io::SeekFrom::Start(entry.offset))
+            .await?;
+
+        let mut lfh_fixed = vec![0u8; 30];
+        self.buffer.read(&mut lfh_fixed).await?;
+
+        if &lfh_fixed[0..4] != &[0x50, 0x4b, 0x03, 0x04] {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "Invalid Local File Header signature",
+            ));
+        }
+
+        let fn_len = u16::from_le_bytes([lfh_fixed[26], lfh_fixed[27]]) as usize;
+        let extra_len = u16::from_le_bytes([lfh_fixed[28], lfh_fixed[29]]) as usize;
+        let payload_offset = entry.offset + 30 + fn_len as u64 + extra_len as u64;
+
+        self.buffer
+            .seek(std::io::SeekFrom::Start(payload_offset))
+            .await?;
+
+        Ok(payload_offset)
+    }
 }
 
 #[cfg(test)]
@@ -257,8 +337,10 @@ mod tests {
     // fire AFTER the first checkpoint (≈ 800 ms = 5 MB / 65 536 × 10 ms) but
     // BEFORE full completion.  The `multi_thread` scheduler lets the timer run
     // on a different worker while this one is inside `thread::sleep`.
+    #[cfg(all(feature = "resume", not(target_os = "wasi")))]
     struct SlowVecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
+    #[cfg(all(feature = "resume", not(target_os = "wasi")))]
     impl tokio::io::AsyncWrite for SlowVecWriter {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
@@ -316,6 +398,7 @@ mod tests {
     /// The 0..=255 cycling pattern at level 1 produces many DEFLATE block
     /// boundaries, guaranteeing at least one checkpoint in a partial extraction
     /// at the configured 5 MB interval.
+    #[cfg(all(feature = "resume", not(target_os = "wasi")))]
     async fn generate_resume_test_zip() -> (PathBuf, &'static str) {
         const FILENAME: &str = "resume_payload.bin";
         let zip_path = env::temp_dir().join("resume_integrity_test_archive.zip");
@@ -376,6 +459,7 @@ mod tests {
         let _ = tokio::fs::remove_file(&zip_path).await;
     }
 
+    #[cfg(all(feature = "resume", not(target_os = "wasi")))]
     #[tokio::test]
     async fn test_archive_extract_resumable() {
         let zip_path = generate_test_zip().await;
@@ -399,6 +483,7 @@ mod tests {
         let _ = tokio::fs::remove_file(&out_path).await;
         let _ = tokio::fs::remove_file(&zip_path).await;
     }
+    #[cfg(all(feature = "resume", not(target_os = "wasi")))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_resume_interrupt_and_append_integrity() {
         let (zip_path, filename) = generate_resume_test_zip().await;

@@ -27,7 +27,10 @@ pub trait Seeker {
 pub enum SeekerImpl {
     #[cfg(not(target_arch = "wasm32"))]
     File(file::FileSeeker),
+    #[cfg(not(target_os = "wasi"))]
     Http(http::HttpSeeker),
+    #[cfg(target_os = "wasi")]
+    WasiHttp(wasi_http::WasiHttpSeeker),
 }
 
 impl Seeker for SeekerImpl {
@@ -39,7 +42,10 @@ impl Seeker for SeekerImpl {
         async move {
             match self {
                 SeekerImpl::File(s) => s.read(buf).await,
+                #[cfg(not(target_os = "wasi"))]
                 SeekerImpl::Http(s) => s.read(buf).await,
+                #[cfg(target_os = "wasi")]
+                SeekerImpl::WasiHttp(s) => s.read(buf).await,
             }
         }
     }
@@ -51,7 +57,10 @@ impl Seeker for SeekerImpl {
     ) -> impl std::future::Future<Output = Result<usize, IoError>> + 'a {
         async move {
             match self {
+                #[cfg(not(target_os = "wasi"))]
                 SeekerImpl::Http(s) => s.read(buf).await,
+                #[cfg(target_os = "wasi")]
+                SeekerImpl::WasiHttp(s) => s.read(buf).await,
             }
         }
     }
@@ -64,7 +73,10 @@ impl Seeker for SeekerImpl {
         async move {
             match self {
                 SeekerImpl::File(s) => s.seek(pos).await,
+                #[cfg(not(target_os = "wasi"))]
                 SeekerImpl::Http(s) => s.seek(pos).await,
+                #[cfg(target_os = "wasi")]
+                SeekerImpl::WasiHttp(s) => s.seek(pos).await,
             }
         }
     }
@@ -76,7 +88,10 @@ impl Seeker for SeekerImpl {
     ) -> impl std::future::Future<Output = Result<u64, IoError>> + '_ {
         async move {
             match self {
+                #[cfg(not(target_os = "wasi"))]
                 SeekerImpl::Http(s) => s.seek(pos).await,
+                #[cfg(target_os = "wasi")]
+                SeekerImpl::WasiHttp(s) => s.seek(pos).await,
             }
         }
     }
@@ -85,4 +100,8 @@ impl Seeker for SeekerImpl {
 #[cfg(not(target_arch = "wasm32"))]
 pub mod file;
 
+#[cfg(not(target_os = "wasi"))]
 pub mod http;
+
+#[cfg(target_os = "wasi")]
+pub mod wasi_http;

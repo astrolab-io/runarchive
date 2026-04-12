@@ -3,10 +3,14 @@ pub mod parser;
 pub mod seeker;
 pub mod archive;
 pub mod deflate;
-pub mod progress;
+
+#[cfg(all(feature = "resume", not(target_os = "wasi")))]
 pub mod resume;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "cli")]
+pub mod progress;
+
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 pub mod wasm;
 
 pub use archive::{Archive, FileEntry};

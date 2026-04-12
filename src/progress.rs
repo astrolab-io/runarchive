@@ -1,11 +1,16 @@
+//! CLI progress reporting via `indicatif`. Only compiled when the `cli` feature is enabled.
+
+#[cfg(feature = "cli")]
 use crate::deflate::ProgressObserver;
 
+#[cfg(feature = "cli")]
 pub struct IndicatifProgress {
     pub pb_download: Option<indicatif::ProgressBar>,
     pub pb_decompress: Option<indicatif::ProgressBar>,
     pub mp: Option<indicatif::MultiProgress>,
 }
 
+#[cfg(feature = "cli")]
 impl ProgressObserver for IndicatifProgress {
     fn update_download(&self, bytes: u64) {
         if let Some(ref pb) = self.pb_download {
