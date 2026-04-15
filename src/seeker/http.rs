@@ -3,27 +3,30 @@ use std::io::SeekFrom;
 use std::io::{Error as IoError, ErrorKind};
 
 #[cfg(not(target_os = "wasi"))]
-use reqwest::{Client, Url};
+use reqwest::Client;
 
 #[cfg(target_os = "wasi")]
 use wstd::http::{Client, Request};
 
 pub struct HttpSeeker {
     client: Client,
-    #[cfg(not(target_os = "wasi"))]
-    url: Url,
-    #[cfg(target_os = "wasi")]
     url: String,
+    auth: Option<String>,
     current_offset: u64,
     file_size: u64,
 }
 
 impl HttpSeeker {
     pub async fn new(url_str: &str) -> Result<Self, IoError> {
+        let (url_clean, auth) = extract_auth(url_str);
+
+        let url = url_clean;
+
         #[cfg(not(target_os = "wasi"))]
-        let url = Url::parse(url_str).map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
-        #[cfg(target_os = "wasi")]
-        let url = url_str.to_string();
+        {
+            // Validation for reqwest
+            let _ = url::Url::parse(&url).map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
+        }
 
         #[cfg(not(target_arch = "wasm32"))]
         let client = Client::builder()
@@ -41,8 +44,11 @@ impl HttpSeeker {
 
         #[cfg(not(target_os = "wasi"))]
         {
-            let head_resp = client
-                .head(url.clone())
+            let mut req_builder = client.head(&url);
+            if let Some(ref a) = auth {
+                req_builder = req_builder.header(reqwest::header::AUTHORIZATION, a);
+            }
+            let head_resp = req_builder
                 .send()
                 .await
                 .map_err(|e| IoError::new(ErrorKind::ConnectionAborted, e))?;
@@ -55,9 +61,11 @@ impl HttpSeeker {
 
             // If HEAD failed or gave 0 length, fallback to GET Range=0-0
             if file_size == 0 {
-                let get_resp = client
-                    .get(url.clone())
-                    .header(reqwest::header::RANGE, "bytes=0-0")
+                let mut req_builder = client.get(&url).header(reqwest::header::RANGE, "bytes=0-0");
+                if let Some(ref a) = auth {
+                    req_builder = req_builder.header(reqwest::header::AUTHORIZATION, a);
+                }
+                let get_resp = req_builder
                     .send()
                     .await
                     .map_err(|e| IoError::new(ErrorKind::ConnectionAborted, e))?;
@@ -78,7 +86,11 @@ impl HttpSeeker {
 
         #[cfg(target_os = "wasi")]
         {
-            let req = Request::head(&url)
+            let mut req_builder = Request::head(&url);
+            if let Some(ref a) = auth {
+                req_builder = req_builder.header("authorization", a);
+            }
+            let req = req_builder
                 .body(wstd::http::Body::empty())
                 .map_err(|e| IoError::new(ErrorKind::Other, e))?;
             let resp = client
@@ -94,11 +106,19 @@ impl HttpSeeker {
                         }
                     }
                 }
+            } else if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
+                return Err(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    format!("Authentication failed with status: {} for {}", resp.status(), url),
+                ));
             }
 
             if file_size == 0 {
-                let req = Request::get(&url)
-                    .header("range", "bytes=0-0")
+                let mut req_builder = Request::get(&url).header("range", "bytes=0-0");
+                if let Some(ref a) = auth {
+                    req_builder = req_builder.header("authorization", a);
+                }
+                let req = req_builder
                     .body(wstd::http::Body::empty())
                     .map_err(|e| IoError::new(ErrorKind::Other, e))?;
                 let resp = client
@@ -131,6 +151,7 @@ impl HttpSeeker {
         Ok(Self {
             client,
             url,
+            auth,
             current_offset: 0,
             file_size,
         })
@@ -141,14 +162,19 @@ impl HttpSeeker {
     }
 
     pub async fn new_with_size(url_str: &str, file_size: u64) -> Result<Self, IoError> {
+        let (url_clean, auth) = extract_auth(url_str);
+
+        let url = url_clean;
+
         #[cfg(not(target_os = "wasi"))]
-        let url = Url::parse(url_str).map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
-        #[cfg(target_os = "wasi")]
-        let url = url_str.to_string();
+        {
+            let _ = url::Url::parse(&url).map_err(|e| IoError::new(ErrorKind::InvalidInput, e))?;
+        }
 
         Ok(Self {
             client: Client::new(),
             url,
+            auth,
             current_offset: 0,
             file_size,
         })
@@ -177,10 +203,11 @@ impl Seeker for HttpSeeker {
 
         #[cfg(not(target_os = "wasi"))]
         {
-            let resp = self
-                .client
-                .get(self.url.clone())
-                .header(reqwest::header::RANGE, range_header)
+            let mut req_builder = self.client.get(&self.url).header(reqwest::header::RANGE, range_header);
+            if let Some(ref a) = self.auth {
+                req_builder = req_builder.header(reqwest::header::AUTHORIZATION, a);
+            }
+            let resp = req_builder
                 .send()
                 .await
                 .map_err(|e| IoError::new(ErrorKind::ConnectionAborted, e))?;
@@ -213,8 +240,11 @@ impl Seeker for HttpSeeker {
 
         #[cfg(target_os = "wasi")]
         {
-            let req = Request::get(&self.url)
-                .header("range", range_header)
+            let mut req_builder = Request::get(&self.url).header("range", range_header);
+            if let Some(ref a) = self.auth {
+                req_builder = req_builder.header("authorization", a);
+            }
+            let req = req_builder
                 .body(wstd::http::Body::empty())
                 .map_err(|e| IoError::new(ErrorKind::Other, e))?;
             let resp = self
@@ -270,7 +300,30 @@ impl Seeker for HttpSeeker {
             }
         };
 
-        self.current_offset = std::cmp::min(new_offset, self.file_size);
+    self.current_offset = std::cmp::min(new_offset, self.file_size);
         Ok(self.current_offset)
     }
+}
+
+fn extract_auth(url_str: &str) -> (String, Option<String>) {
+    use url::Url;
+    if let Ok(mut url) = Url::parse(url_str) {
+        if !url.username().is_empty() || url.password().is_some() {
+            let user = url.username();
+            let pass = url.password().unwrap_or("");
+
+            use base64::prelude::*;
+            let auth = format!(
+                "Basic {}",
+                BASE64_STANDARD.encode(format!("{}:{}", user, pass))
+            );
+
+            // Reconstruct URL without credentials
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+
+            return (url.to_string(), Some(auth));
+        }
+    }
+    (url_str.to_string(), None)
 }

@@ -1384,6 +1384,7 @@ version = "0.1.0"
 dependencies = [
  "async-compression",
  "async-trait",
+ "base64",
  "bytes",
  "clap",
  "flate2",
@@ -1393,6 +1394,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
