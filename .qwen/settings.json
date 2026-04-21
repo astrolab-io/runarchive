@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm *)",
+      "Bash(cargo build)",
+      "Bash(cargo test)",
+      "Bash(wc *)"
+    ]
+  },
+  "$version": 3
+}

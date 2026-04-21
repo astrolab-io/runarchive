@@ -1,7 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
-#[cfg(not(target_arch = "wasm32"))]
-use std::process::exit;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug)]
@@ -23,16 +21,25 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
-    let mut archive = runarchive::Archive::open(&cli.uri).await.unwrap_or_else(|e| {
-        eprintln!("Failed to read archive metadata: {}", e);
-        exit(1);
-    });
+    let mut archive = runarchive::Archive::open(&cli.uri)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to read archive metadata: {}", e);
+            std::process::exit(1);
+        });
 
     if let Some(filename) = cli.filename {
         let mut stdout = tokio::io::stdout();
-        if let Err(e) = archive.extract_file(&filename, &mut stdout).await {
-            eprintln!("Failed to extract file: {}", e);
-            exit(1);
+        let mut reader = match archive.extract_file(&filename).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Failed to extract file: {}", e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = tokio::io::copy(&mut reader, &mut stdout).await {
+            eprintln!("Failed to write to stdout: {}", e);
+            std::process::exit(1);
         }
     } else {
         let files = archive.list_files();
