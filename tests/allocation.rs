@@ -2,6 +2,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use dhat::HeapStats;
+
+    #[cfg(any(feature = "async-futures", feature = "async-tokio"))]
     use std::io::Write;
 
     #[global_allocator]
@@ -88,6 +90,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "async-futures", feature = "async-tokio"))]
     fn archive_open_no_heap_for_parsing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let zip_path = temp_dir.path().join("test.zip");
@@ -120,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "async-futures", feature = "async-tokio"))]
     fn archive_file_entry_name_arc_no_heap_on_open() {
         let temp_dir = tempfile::tempdir().unwrap();
         let zip_path = temp_dir.path().join("test.zip");

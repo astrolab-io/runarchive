@@ -1,5 +1,6 @@
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(feature = "async-futures", feature = "async-tokio"))]
 mod tests {
     use runarchive::reader::Reader;
     use wiremock::matchers::{header, method};

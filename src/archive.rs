@@ -1,14 +1,64 @@
+#[cfg(feature = "async-futures")]
+use async_compression::futures::bufread::DeflateDecoder;
+#[cfg(feature = "async-tokio")]
 use async_compression::tokio::bufread::DeflateDecoder;
-use std::io::{Error as IoError, ErrorKind};
+
+#[cfg(feature = "async-futures")]
+use futures::AsyncRead;
+#[cfg(feature = "async-tokio")]
+use tokio::io::{AsyncRead, ReadBuf};
+
+use pin_project_lite::pin_project;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::BufReader;
-use tokio::io::{AsyncRead, ReadBuf};
-use tokio_util::io::StreamReader;
 
-use crate::parser;
-use crate::reader::Reader;
+#[cfg(feature = "async-tokio")]
+type StreamReaderType = tokio_util::io::StreamReader<super::reader::ByteStream, bytes::Bytes>;
+
+#[cfg(feature = "async-tokio")]
+pin_project! {
+    pub struct ArchiveReader {
+        #[pin]
+        pub inner: DeflateDecoder<StreamReaderType>,
+    }
+}
+
+#[cfg(feature = "async-futures")]
+pin_project! {
+    pub struct ArchiveReader<R> {
+        #[pin]
+        pub inner: DeflateDecoder<R>,
+    }
+}
+
+#[cfg(feature = "async-tokio")]
+impl AsyncRead for ArchiveReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.project().inner.poll_read(cx, buf)
+    }
+}
+
+#[cfg(feature = "async-futures")]
+impl<R: futures::AsyncBufRead> AsyncRead for ArchiveReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        self.project().inner.poll_read(cx, buf)
+    }
+}
+
+#[cfg(feature = "async-tokio")]
+unsafe impl Send for ArchiveReader {}
+
+#[cfg(feature = "async-futures")]
+unsafe impl<R: futures::AsyncBufRead> Send for ArchiveReader<R> {}
 
 #[derive(Debug, Clone)]
 pub struct FileEntry {
@@ -19,26 +69,8 @@ pub struct FileEntry {
     pub offset: u64,
 }
 
-pub enum ArchiveReader<R> {
-    Stored(R),
-    Deflated(DeflateDecoder<BufReader<R>>),
-}
-
-impl<R: AsyncRead + Unpin + Send + 'static> AsyncRead for ArchiveReader<R> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
-            ArchiveReader::Stored(r) => Pin::new(r).poll_read(cx, buf),
-            ArchiveReader::Deflated(r) => Pin::new(r).poll_read(cx, buf),
-        }
-    }
-}
-
-impl<R: Unpin> Unpin for ArchiveReader<R> {}
-unsafe impl<R: Send> Send for ArchiveReader<R> {}
+use super::reader::Reader;
+use std::io::{Error as IoError, ErrorKind};
 
 pub struct Archive {
     reader: Reader,
@@ -58,30 +90,36 @@ impl Archive {
         let eocd_start = file_size.saturating_sub(max_eocd_size);
         let eocd_size = (file_size - eocd_start) as usize;
 
-        let eocd_buffer = reader.read_range(eocd_start, eocd_size).await?;
+        let eocd_buffer = reader
+            .read(eocd_start..eocd_start + eocd_size as u64)
+            .await?;
 
-        let eocd_rel_offset = parser::find_eocd_offset(&eocd_buffer)
+        let eocd_rel_offset = crate::parser::find_eocd_offset(&eocd_buffer)
             .map_err(|_| IoError::new(ErrorKind::InvalidData, "Failed to find EOCD signature."))?;
 
-        let eocd = parser::parse_eocd(&eocd_buffer[eocd_rel_offset..])
+        let eocd = crate::parser::parse_eocd(&eocd_buffer[eocd_rel_offset..])
             .map_err(|_| IoError::new(ErrorKind::InvalidData, "Failed to parse EOCD"))?;
 
         let (cd_start, cd_size) = if eocd.cd_offset == 0xFFFFFFFF {
-            let zip64_locator_offset = parser::find_zip64_locator(&eocd_buffer).map_err(|_| {
-                IoError::new(ErrorKind::InvalidData, "Failed to find ZIP64 locator")
-            })?;
+            let zip64_locator_offset =
+                crate::parser::find_zip64_locator(&eocd_buffer).map_err(|_| {
+                    IoError::new(ErrorKind::InvalidData, "Failed to find ZIP64 locator")
+                })?;
 
-            let zip64_locator = parser::parse_zip64_locator(&eocd_buffer[zip64_locator_offset..])
-                .map_err(|_| {
-                IoError::new(ErrorKind::InvalidData, "Failed to parse ZIP64 locator")
-            })?;
+            let zip64_locator = crate::parser::parse_zip64_locator(
+                &eocd_buffer[zip64_locator_offset..],
+            )
+            .map_err(|_| IoError::new(ErrorKind::InvalidData, "Failed to parse ZIP64 locator"))?;
 
             let zip64_eocd_size: usize = 56;
             let zip64_eocd_buffer = reader
-                .read_range(zip64_locator.zip64_eocd_offset, zip64_eocd_size)
+                .read(
+                    zip64_locator.zip64_eocd_offset
+                        ..zip64_locator.zip64_eocd_offset + zip64_eocd_size as u64,
+                )
                 .await?;
 
-            let zip64_eocd = parser::parse_zip64_eocd(&zip64_eocd_buffer)
+            let zip64_eocd = crate::parser::parse_zip64_eocd(&zip64_eocd_buffer)
                 .map_err(|_| IoError::new(ErrorKind::InvalidData, "Failed to parse ZIP64 EOCD"))?;
 
             (zip64_eocd.cd_offset, zip64_eocd.cd_size as usize)
@@ -89,12 +127,12 @@ impl Archive {
             (eocd.cd_offset as u64, eocd.cd_size as usize)
         };
 
-        let cd_buffer = reader.read_range(cd_start, cd_size).await?;
+        let cd_buffer = reader.read(cd_start..cd_start + cd_size as u64).await?;
 
-        let headers = parser::iterate_central_directory(&cd_buffer, eocd.total_cd_records)
+        let headers = crate::parser::iterate_central_directory(&cd_buffer, eocd.total_cd_records)
             .map_err(|_| {
-                IoError::new(ErrorKind::InvalidData, "Failed to parse central directory")
-            })?;
+            IoError::new(ErrorKind::InvalidData, "Failed to parse central directory")
+        })?;
 
         let mut entries = Vec::with_capacity(headers.len());
         for h in headers {
@@ -114,11 +152,11 @@ impl Archive {
         &self.entries
     }
 
-    /// Extracts a file by name and returns a streaming `AsyncRead` handle.
+    #[cfg(feature = "async-tokio")]
     pub async fn extract_file(
         &mut self,
         filename: &str,
-    ) -> Result<impl AsyncRead + Unpin + Send + 'static, IoError> {
+    ) -> Result<impl tokio::io::AsyncRead + Unpin + Send + 'static, IoError> {
         let target = self
             .entries
             .iter()
@@ -126,7 +164,7 @@ impl Archive {
             .cloned()
             .ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
 
-        let lfh_fixed = self.reader.read_range(target.offset, 30).await?;
+        let lfh_fixed = self.reader.read(target.offset..target.offset + 30).await?;
 
         if &lfh_fixed[0..4] != &[0x50, 0x4b, 0x03, 0x04] {
             return Err(IoError::new(
@@ -141,22 +179,69 @@ impl Archive {
         let payload_offset = target.offset + 30 + fn_len as u64 + extra_len as u64;
         let range = payload_offset..payload_offset + target.compressed_size;
 
-        let stream = self.reader.stream(range).await?;
+        let stream = self.reader.read_to_stream(range).await?;
+        use tokio_util::io::StreamReader;
+        let stream_reader: StreamReader<_, bytes::Bytes> = StreamReader::new(stream);
 
-        match target.compression_method {
-            0 => {
-                let reader = StreamReader::new(stream);
-                Ok(ArchiveReader::Stored(reader))
-            }
-            8 => {
-                let reader = StreamReader::new(stream);
-                let decoder = DeflateDecoder::new(BufReader::new(reader));
-                Ok(ArchiveReader::Deflated(decoder))
-            }
-            other => Err(IoError::new(
-                ErrorKind::Unsupported,
-                format!("Unsupported compression: {}", other),
-            )),
+        let result: Box<dyn tokio::io::AsyncRead + Unpin + Send + 'static> =
+            match target.compression_method {
+                0 => Box::new(stream_reader),
+                8 => Box::new(ArchiveReader {
+                    inner: DeflateDecoder::new(stream_reader) as DeflateDecoder<StreamReaderType>,
+                }),
+                other => {
+                    return Err(IoError::new(
+                        ErrorKind::Unsupported,
+                        format!("Unsupported compression: {}", other),
+                    ))
+                }
+            };
+        Ok(result)
+    }
+
+    #[cfg(feature = "async-futures")]
+    pub async fn extract_file(
+        &mut self,
+        filename: &str,
+    ) -> Result<impl futures::AsyncRead + Unpin + Send + 'static, IoError> {
+        let target = self
+            .entries
+            .iter()
+            .find(|e| e.name.as_ref() == filename)
+            .cloned()
+            .ok_or_else(|| IoError::new(ErrorKind::NotFound, "File not found in archive"))?;
+
+        let lfh_fixed = self.reader.read(target.offset..target.offset + 30).await?;
+
+        if &lfh_fixed[0..4] != &[0x50, 0x4b, 0x03, 0x04] {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "Invalid Local File Header signature",
+            ));
         }
+
+        let fn_len = u16::from_le_bytes([lfh_fixed[26], lfh_fixed[27]]) as usize;
+        let extra_len = u16::from_le_bytes([lfh_fixed[28], lfh_fixed[29]]) as usize;
+
+        let payload_offset = target.offset + 30 + fn_len as u64 + extra_len as u64;
+        let range = payload_offset..payload_offset + target.compressed_size;
+
+        #[cfg(feature = "async-futures")]
+        let async_bufread = self.reader.into_async_bufread(range).await?;
+
+        let result: Box<dyn futures::AsyncRead + Unpin + Send + 'static> =
+            match target.compression_method {
+                0 => Box::new(async_bufread),
+                8 => Box::new(ArchiveReader {
+                    inner: DeflateDecoder::new(async_bufread),
+                }),
+                other => {
+                    return Err(IoError::new(
+                        ErrorKind::Unsupported,
+                        format!("Unsupported compression: {}", other),
+                    ))
+                }
+            };
+        Ok(result)
     }
 }

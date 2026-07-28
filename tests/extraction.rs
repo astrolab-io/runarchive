@@ -1,9 +1,14 @@
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(feature = "async-futures", feature = "async-tokio"))]
 mod tests {
     use runarchive::Archive;
     use std::io::Write;
+
+    #[cfg(feature = "async-tokio")]
     use tokio::io::AsyncReadExt;
+    #[cfg(feature = "async-futures")]
+    use futures::io::AsyncReadExt;
 
     #[tokio::test]
     async fn test_extract_stored_file() {
