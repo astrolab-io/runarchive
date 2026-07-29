@@ -40,12 +40,16 @@ impl Reader {
         let (uri, path) = split_zip_uri(uri)
             .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "Invalid ZIP URI"))?;
 
-        let operator = opendal::blocking::Operator::from_uri(uri.as_str()).map_err(|e| {
-            IoError::new(
-                ErrorKind::Other,
-                format!("Failed to create operator: {}", e),
-            )
-        })?;
+        // Retry/resume policy lives in `crate::operator`, shared with the async
+        // reader. Wrapping it for blocking use needs an ambient tokio handle —
+        // the same requirement `blocking::Operator::from_uri` had.
+        let operator = opendal::blocking::Operator::new(crate::operator::build(uri.as_str())?)
+            .map_err(|e| {
+                IoError::new(
+                    ErrorKind::Other,
+                    format!("Failed to create operator: {}", e),
+                )
+            })?;
 
         let meta = operator
             .stat(&path)

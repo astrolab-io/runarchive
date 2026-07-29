@@ -18,7 +18,9 @@ async-tokio = ["async-compression/tokio", "tokio", "tokio-util", "pin-project-li
 [dependencies]
 bytes = "1.11"
 clap = { version = "4.6", features = ["derive"] }
-opendal = { version = "0.56", features = ["auto-register-services", "services-fs", "services-http", "services-webdav"] }
+# `layers-retry` is one of opendal's defaults, but every read goes through it
+# (see src/operator.rs) so it is named explicitly rather than inherited.
+opendal = { version = "0.56", features = ["auto-register-services", "layers-retry", "services-fs", "services-http", "services-webdav"] }
 tracing = "0.1"
 url = "2.5"
 tempfile = "3.10"
@@ -39,3 +41,6 @@ wasm-bindgen-test = "0.3.42"
 wiremock = "0.6"
 tempfile = "3.10"
 zip = "0.6"
+# The retry test needs a raw TCP origin (wiremock cannot truncate a body
+# mid-flight), so it drives listeners and the multi-thread runtime directly.
+tokio = { version = "1", features = ["net", "macros", "rt-multi-thread", "io-util"] }

@@ -1,5 +1,10 @@
 pub mod parser;
 
+/// Storage-handle construction shared by the blocking and async readers — this
+/// is where the retry/resume policy for dropped connections lives.
+#[cfg(any(feature = "sync", feature = "async-futures", feature = "async-tokio"))]
+mod operator;
+
 #[cfg(feature = "sync")]
 pub mod blocking;
 

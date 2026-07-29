@@ -44,12 +44,8 @@ impl Reader {
         let (uri, path) = split_zip_uri(uri)
             .ok_or_else(|| IoError::new(ErrorKind::InvalidInput, "Invalid ZIP URI"))?;
 
-        let operator = opendal::Operator::from_uri(uri.as_str()).map_err(|e| {
-            IoError::new(
-                ErrorKind::Other,
-                format!("Failed to create operator: {}", e),
-            )
-        })?;
+        // Reads resume in place after a dropped connection — see `crate::operator`.
+        let operator = crate::operator::build(uri.as_str())?;
 
         let meta = operator
             .stat(&path)
