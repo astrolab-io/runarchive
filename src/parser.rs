@@ -13,6 +13,11 @@ const ZIP64_EOCD_RECORD_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x06, 0x06];
 const MIN_EOCD_SIZE: usize = 22;
 const MAX_EOCD_SIZE: usize = 65557;
 
+/// Header id of the zip64 extended information extra field.
+const ZIP64_EXTRA_ID: u16 = 0x0001;
+/// What a 32-bit size/offset field carries when the real value needs 64 bits.
+const ZIP64_SENTINEL: u32 = 0xFFFF_FFFF;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct EocdRecord {
     pub disk_number: u16,
@@ -124,6 +129,76 @@ pub struct CentralDirectoryHeader<'a> {
     pub extra_field: &'a [u8],
     pub file_comment: &'a [u8],
     pub local_header_offset: u32,
+}
+
+/// An entry's sizes and local-header offset with any zip64 sentinel resolved —
+/// see [`CentralDirectoryHeader::extent`].
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct EntryExtent {
+    pub uncompressed_size: u64,
+    pub compressed_size: u64,
+    pub local_header_offset: u64,
+}
+
+impl<'a> CentralDirectoryHeader<'a> {
+    /// The entry's sizes and offset in their true 64-bit form.
+    ///
+    /// A central-directory header holds these in 32-bit fields. When a value
+    /// does not fit, the field carries `0xFFFFFFFF` and the real one lives in
+    /// the zip64 extended information extra field (header id `0x0001`), which
+    /// contains only the overflowed fields, in a fixed order: uncompressed
+    /// size, compressed size, local-header offset.
+    ///
+    /// Reading the 32-bit fields raw is how a 1 GiB member gets requested as a
+    /// 4 GiB range: the sentinel is taken for a length.
+    pub fn extent(&self) -> EntryExtent {
+        let mut zip64 = zip64_extra_field(self.extra_field).unwrap_or_default();
+        // The extra field is positional: each sentinel consumes the next u64,
+        // so the fields must be resolved in the order the spec lists them.
+        let mut resolve = |sentinel_in_header: bool, header_value: u32| -> u64 {
+            match zip64.get(..8) {
+                Some(bytes) if sentinel_in_header => {
+                    zip64 = &zip64[8..];
+                    u64::from_le_bytes(bytes.try_into().expect("8-byte slice"))
+                }
+                // A missing or truncated extra field leaves nothing better than
+                // the header value — a malformed archive, not a zip64 one.
+                _ => header_value as u64,
+            }
+        };
+
+        let uncompressed_size = resolve(
+            self.uncompressed_size == ZIP64_SENTINEL,
+            self.uncompressed_size,
+        );
+        let compressed_size = resolve(self.compressed_size == ZIP64_SENTINEL, self.compressed_size);
+        let local_header_offset = resolve(
+            self.local_header_offset == ZIP64_SENTINEL,
+            self.local_header_offset,
+        );
+
+        EntryExtent {
+            uncompressed_size,
+            compressed_size,
+            local_header_offset,
+        }
+    }
+}
+
+/// The payload of the zip64 extended information block, if the entry carries
+/// one. Extra fields are a sequence of `(id: u16, len: u16, payload)` blocks.
+fn zip64_extra_field(extra_field: &[u8]) -> Option<&[u8]> {
+    let mut rest = extra_field;
+    while rest.len() >= 4 {
+        let id = u16::from_le_bytes([rest[0], rest[1]]);
+        let len = u16::from_le_bytes([rest[2], rest[3]]) as usize;
+        let payload = rest.get(4..4 + len)?;
+        if id == ZIP64_EXTRA_ID {
+            return Some(payload);
+        }
+        rest = &rest[4 + len..];
+    }
+    None
 }
 
 pub fn parse_central_directory_header<'a>(

@@ -192,3 +192,33 @@ async fn intact_body_is_read_in_one_request() {
     let ranges = origin.ranges.lock().expect("ranges lock").clone();
     assert_eq!(ranges.len(), 1, "healthy read must not retry: {ranges:?}");
 }
+
+/// A read larger than `READ_CHUNK` must arrive as several bounded requests
+/// rather than one open-ended body: a held-open socket is what origins hang up
+/// on, and the caller's pace must not decide how long it stays open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_read_is_split_into_bounded_requests() {
+    // Two full chunks and a short one, so both the split and the tail show up.
+    let total = runarchive::READ_CHUNK * 2 + 1024;
+    let body = Arc::new((0..total).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+    // `total` is never < a slice length, so no GET is broken: this test is
+    // about request shape, not recovery.
+    let origin = spawn_origin(body.clone(), total).await;
+    let uri = format!("{}/data.bin", origin.base_uri);
+
+    let got = tokio::task::spawn_blocking(move || {
+        runarchive::blocking::reader::Reader::open(&uri)?.read(0..total as u64)
+    })
+    .await
+    .expect("join")
+    .expect("read");
+
+    assert_eq!(got.as_ref(), body.as_slice(), "chunks reassembled wrong");
+
+    let chunk = runarchive::READ_CHUNK;
+    let ranges = origin.ranges.lock().expect("ranges lock").clone();
+    assert_eq!(ranges.len(), 3, "expected one request per chunk: {ranges:?}");
+    assert_eq!(ranges[0], format!("bytes=0-{}", chunk - 1));
+    assert_eq!(ranges[1], format!("bytes={chunk}-{}", 2 * chunk - 1));
+    assert_eq!(ranges[2], format!("bytes={}-{}", 2 * chunk, total - 1));
+}

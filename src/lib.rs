@@ -1,9 +1,13 @@
 pub mod parser;
 
 /// Storage-handle construction shared by the blocking and async readers — this
-/// is where the retry/resume policy for dropped connections lives.
+/// is where the retry/resume and request-size policy for reads lives.
 #[cfg(any(feature = "sync", feature = "async-futures", feature = "async-tokio"))]
 mod operator;
+
+/// How many bytes one range request asks the origin for.
+#[cfg(any(feature = "sync", feature = "async-futures", feature = "async-tokio"))]
+pub use operator::READ_CHUNK;
 
 #[cfg(feature = "sync")]
 pub mod blocking;

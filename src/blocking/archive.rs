@@ -88,12 +88,15 @@ impl Archive {
 
         let mut entries = Vec::with_capacity(headers.len());
         for h in headers {
+            // `extent`, not the raw 32-bit fields: a zip64 entry keeps its real
+            // sizes in the extra field and the header carries only a sentinel.
+            let extent = h.extent();
             entries.push(FileEntry {
                 name: std::sync::Arc::from(h.file_name),
-                size: h.uncompressed_size as u64,
-                compressed_size: h.compressed_size as u64,
+                size: extent.uncompressed_size,
+                compressed_size: extent.compressed_size,
                 compression_method: h.compression_method,
-                offset: h.local_header_offset as u64,
+                offset: extent.local_header_offset,
             });
         }
 

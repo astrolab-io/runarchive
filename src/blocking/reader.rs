@@ -57,8 +57,10 @@ impl Reader {
 
         let file_size = meta.content_length();
 
+        // Chunked, so no single request spans a whole member — see
+        // `crate::operator`.
         let reader = operator
-            .reader(&path)
+            .reader_options(&path, crate::operator::reader_options())
             .map_err(|e| IoError::new(ErrorKind::Other, format!("Failed to open reader: {}", e)))?;
 
         Ok(Self {

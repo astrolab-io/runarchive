@@ -14,6 +14,17 @@
 //! the caller sees stays contiguous and the decoder never learns a reconnect
 //! happened. Retries fire only for errors opendal marks temporary (transport
 //! drops, timeouts, 5xx, 429) — a 404 or a malformed archive still fails fast.
+//!
+//! Retrying is the second line of defence; not provoking the drop is the first,
+//! which is what `READ_CHUNK` is for. Without a chunk size opendal serves the
+//! whole range from a single response body, so the socket stays open for as
+//! long as the *caller* takes to consume it — a decoder feeding a slow parser
+//! can hold one connection open for hours, which is exactly the shape origins
+//! (and the middleboxes in front of them) hang up on. With a chunk size, each
+//! request downloads at most that much, at network speed, into memory; the
+//! caller then drains it with no connection held. Requests get short and
+//! predictable, and public-sector origins that cap per-connection transfer see
+//! a well-behaved client instead of one multi-gigabyte GET.
 
 use opendal::layers::RetryLayer;
 use std::io::{Error as IoError, ErrorKind};
@@ -29,6 +40,22 @@ const MAX_RETRIES: usize = 8;
 /// to re-reading the bytes already delivered.
 const MIN_DELAY: Duration = Duration::from_millis(500);
 const MAX_DELAY: Duration = Duration::from_secs(10);
+
+/// Bytes per request when reading a range. Small enough that one request is
+/// seconds of transfer rather than hours, and that a drop costs at most this
+/// much re-reading; large enough that a gigabyte member is a few hundred
+/// requests, not a few hundred thousand. It is also the reader's peak buffer,
+/// since a chunk is held in memory while the caller drains it.
+pub const READ_CHUNK: usize = 8 * 1024 * 1024;
+
+/// Reader options carrying the chunk policy: one per read site, so no caller
+/// can accidentally open an unbounded stream.
+pub(crate) fn reader_options() -> opendal::options::ReaderOptions {
+    opendal::options::ReaderOptions {
+        chunk: Some(READ_CHUNK),
+        ..Default::default()
+    }
+}
 
 /// Build an operator rooted at `uri` (a directory) whose reads resume in place
 /// after a dropped connection.
